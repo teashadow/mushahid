@@ -80,7 +80,19 @@ HOOK_JS = r"""
         const pk = (k) => { try { return (k && k.extractable && k.type && k.algorithm)
               ? {type: k.type, alg: k.algorithm.name} : String(k); } catch (e) { return '?'; } };
         log('crypto', {op, algo: safe(algo), args: rest.slice(0,2).map(pk)});
-        return orig(algo, ...rest);
+        const res = orig(algo, ...rest);
+        if ((op === 'decrypt' || op === 'encrypt') && res && res.then) {
+          res.then(buf => {
+            try {
+              const b = new Uint8Array(buf);
+              let preview = '';
+              for (let i = 0; i < Math.min(b.length, 48); i++) preview += String.fromCharCode(b[i]);
+              log('plain', {op, len: b.length, head: preview,
+                hex: Array.from(b.slice(0, 32)).map(x => x.toString(16).padStart(2,'0')).join('')});
+            } catch (e) {}
+          }).catch(() => {});
+        }
+        return res;
       };
     }
   }
