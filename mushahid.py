@@ -160,7 +160,9 @@ def main():
     cdp.send("Network.enable")
     cdp.send("Runtime.enable")
     cdp.send("Page.enable")
-    cdp.send("Page.addScriptToEvaluateOnNewDocument", {"source": HOOK_JS})
+    import os
+    if not os.environ.get("MOSS_NO_HOOK"):
+        cdp.send("Page.addScriptToEvaluateOnNewDocument", {"source": HOOK_JS})
 
     url_map = {}   # requestId -> url
     id2rid = {}    # cdp call id -> requestId (pending getResponseBody)
