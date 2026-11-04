@@ -77,10 +77,35 @@ HOOK_JS = r"""
       subtle[op] = function(algo, ...rest) {
         const safe = (o) => { try { return JSON.parse(JSON.stringify(o)); }
                               catch (e) { return String(o); } };
-        log('crypto', {op, algo: safe(algo)});
+        const pk = (k) => { try { return (k && k.extractable && k.type && k.algorithm)
+              ? {type: k.type, alg: k.algorithm.name} : String(k); } catch (e) { return '?'; } };
+        log('crypto', {op, algo: safe(algo), args: rest.slice(0,2).map(pk)});
         return orig(algo, ...rest);
       };
     }
+  }
+  // export every generated/imported extractable key (async, quiet)
+  const witnessKey = (k) => {
+    if (!k || !k.extractable || !k.type) return;
+    crypto.subtle.exportKey('raw', k).then(raw => {
+      const b = new Uint8Array(raw);
+      log('keymat', {kt: k.type, alg: k.algorithm && k.algorithm.name,
+        len: b.length, hex: Array.from(b.slice(0, 64)).map(x => x.toString(16).padStart(2,'0')).join('')});
+    }).catch(() => {
+      crypto.subtle.exportKey('jwk', k).then(jwk => {
+        log('keymat', {kt: k.type, alg: k.algorithm && k.algorithm.name, jwk: JSON.stringify(jwk).slice(0, 400)});
+      }).catch(() => {});
+    });
+  };
+  for (const op of ['generateKey', 'importKey']) {
+    const orig = subtle[op].bind(subtle);
+    subtle[op] = function(...a) {
+      const r = orig(...a);
+      if (r && r.then) r.then(k => {
+        (Array.isArray(k) ? k : [k]).forEach(k => k && k.type ? witnessKey(k) : null);
+      }).catch(() => {});
+      return r;
+    };
   }
   // WebAssembly — witness the hidden binary
   const wc = WebAssembly.compile.bind(WebAssembly);
