@@ -22,6 +22,7 @@ import urllib.request
 class CDPSock:
     def __init__(self, ws_url):
         import websocket  # websocket-client, the one true old-school dep
+        self._ws_mod = websocket
         self.ws = websocket.create_connection(ws_url, max_size=None)
         self._id = 0
         self.handlers = {}
@@ -37,6 +38,8 @@ class CDPSock:
         try:
             return json.loads(self.ws.recv())
         except socket.timeout:
+            return None
+        except self._ws_mod.WebSocketTimeoutException:
             return None
 
 
