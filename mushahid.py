@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
-"""mushahid — مشاهِد — the quiet observer.
+"""mushahid — مُشَاهِدٌ — the quiet witness.
 
-Sits under a Chrome (CDP) tab and records everything:
-network bodies, console, crypto keys/plaintext, wasm modules.
-One file, stdlib only. Old school.
+Not a passive spectator: in the tradition the word describes a witness
+whose heart sees through the veil. In that spirit this tool sits under
+a browser tab and bears quiet witness to everything the page does —
+network bodies, console, crypto keys, wasm modules — writing it all
+down without touching anything.
+
+One file, stdlib + websocket-client. Old school.
 
 Usage:
-    python3 mushahid.py --port 9224 [--match substring] [--out run.jsonl]
+    python3 mushahid.py --port 9224 [--match substring] \
+        [--out run.jsonl] [--reload]
+
+The witness sees; it does not touch. Ctrl-C to stop; it prints its tally.
 """
 import argparse
-import base64
 import json
-import os
+import signal
 import socket
 import sys
 import time
 import urllib.request
 
-# --- tiny CDP client (no deps) ----------------------------------------
 
 class CDPSock:
     def __init__(self, ws_url):
@@ -25,7 +30,6 @@ class CDPSock:
         self._ws_mod = websocket
         self.ws = websocket.create_connection(ws_url, max_size=None)
         self._id = 0
-        self.handlers = {}
 
     def send(self, method, params=None):
         self._id += 1
@@ -64,7 +68,7 @@ HOOK_JS = r"""
     try { console.debug('@@moss ' + kind + ' ' + JSON.stringify(data)); }
     catch (e) {}
   };
-  // crypto.subtle
+  // crypto.subtle — witness the keys before the veil falls
   const subtle = crypto.subtle;
   if (subtle) {
     for (const op of ['encrypt','decrypt','sign','verify','generateKey',
@@ -78,7 +82,7 @@ HOOK_JS = r"""
       };
     }
   }
-  // WebAssembly
+  // WebAssembly — witness the hidden binary
   const wc = WebAssembly.compile.bind(WebAssembly);
   WebAssembly.compile = function(buf) {
     try {
@@ -94,10 +98,13 @@ HOOK_JS = r"""
 
 
 def main():
-    ap = argparse.ArgumentParser(description="mushahid — the quiet observer")
+    ap = argparse.ArgumentParser(description="mushahid — the quiet witness")
     ap.add_argument("--port", type=int, default=9224)
     ap.add_argument("--match", default="")
     ap.add_argument("--out", default="run.jsonl")
+    ap.add_argument("--reload", action="store_true",
+                    help="reload the tab once after attach, so the "
+                         "page hooks apply (they live on new documents)")
     args = ap.parse_args()
 
     tab = find_tab(args.port, args.match)
@@ -109,11 +116,25 @@ def main():
     cdp.send("Page.enable")
     cdp.send("Page.addScriptToEvaluateOnNewDocument", {"source": HOOK_JS})
 
-    bodies = {}      # requestId -> base64 body
+    url_map = {}   # requestId -> url
+    id2rid = {}    # cdp call id -> requestId (pending getResponseBody)
     out = open(args.out, "a", buffering=1)
     t0 = time.time()
+    tally = {"req": 0, "resp": 0, "hook": 0, "console": 0, "nav": 0}
 
-    while True:
+    if args.reload:
+        cdp.send("Page.reload")
+        print("(--reload: page reloaded, hooks planted)", file=sys.stderr)
+
+    stop = {"flag": False}
+
+    def _sig(signum, frame):
+        stop["flag"] = True
+
+    signal.signal(signal.SIGINT, _sig)
+    signal.signal(signal.SIGTERM, _sig)
+
+    while not stop["flag"]:
         ev = cdp.next_event()
         if ev is None:
             continue
@@ -123,23 +144,22 @@ def main():
 
         if m == "Network.requestWillBeSent":
             r = p["request"]
-            if r.get("postData"):
-                bodies[p["requestId"]] = r["postData"]
+            rid = p["requestId"]
+            url_map[rid] = r["url"]
             out.write(json.dumps({"t": ts, "ev": "req", "m": r["method"],
                                   "u": r["url"],
                                   "body": (r.get("postData") or "")[:4000]})
                       + "\n")
+            tally["req"] += 1
         elif m == "Network.responseReceived":
             rid = p["requestId"]
-            cdp.send("Network.getResponseBody", {"requestId": rid})
-            bodies.setdefault(rid, None)
-        elif m == "Network.loadingFinished":
-            rid = p["requestId"]
-            if rid in bodies and bodies[rid] is not None:
-                out.write(json.dumps({"t": ts, "ev": "resp",
-                                      "u": "?", "body": bodies[rid][:4000]})
-                          + "\n")
-                del bodies[rid]
+            cid = cdp.send("Network.getResponseBody", {"requestId": rid})
+            id2rid[cid] = rid
+        elif m == "Page.frameNavigated" and not p.get("frame", {}).get("parentId"):
+            url = p["frame"].get("url", "")
+            if url:
+                out.write(json.dumps({"t": ts, "ev": "nav", "u": url}) + "\n")
+                tally["nav"] += 1
         elif m == "Runtime.consoleAPICalled":
             txt = " ".join(str(a.get("value", a.get("description", "")))
                            for a in p.get("args", []))
@@ -148,16 +168,23 @@ def main():
                 out.write(json.dumps({"t": ts, "ev": "hook",
                                       "kind": kind,
                                       "data": json.loads(payload)}) + "\n")
+                tally["hook"] += 1
             elif txt.strip():
                 out.write(json.dumps({"t": ts, "ev": "console",
                                       "level": p.get("type", ""),
                                       "msg": txt[:500]}) + "\n")
-        elif ev.get("id") and "result" in ev:
-            body = ev["result"].get("body")
-            if body:
+                tally["console"] += 1
+        elif "id" in ev and "result" in ev:
+            rid = id2rid.pop(ev["id"], None)
+            body = (ev["result"] or {}).get("body")
+            if rid and body:
                 out.write(json.dumps({"t": ts, "ev": "resp",
-                                      "u": "?",
+                                      "u": url_map.get(rid, "?"),
                                       "body": body[:4000]}) + "\n")
+                tally["resp"] += 1
+
+    print("witness rests: " +
+          " ".join(f"{k}={v}" for k, v in tally.items()), file=sys.stderr)
 
 
 if __name__ == "__main__":
