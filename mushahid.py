@@ -148,7 +148,7 @@ def main():
             url_map[rid] = r["url"]
             out.write(json.dumps({"t": ts, "ev": "req", "m": r["method"],
                                   "u": r["url"],
-                                  "body": (r.get("postData") or "")[:4000]})
+                                  "body": (r.get("postData") or "")[:20000]})
                       + "\n")
             tally["req"] += 1
         elif m == "Network.responseReceived":
@@ -180,7 +180,7 @@ def main():
             if rid and body:
                 out.write(json.dumps({"t": ts, "ev": "resp",
                                       "u": url_map.get(rid, "?"),
-                                      "body": body[:4000]}) + "\n")
+                                      "body": body[:20000]}) + "\n")
                 tally["resp"] += 1
 
     print("witness rests: " +
